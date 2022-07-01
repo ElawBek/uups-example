@@ -45,7 +45,7 @@ deployV1.ts:
 5. deposit 100 tokens to vaultV1 contract through proxy
 6. verify contracts on the scanner
 
-deployV2.ts: (copy your admin and proxy addresses from the scanner)
+deployV2.ts: (copy your token1 and proxy addresses from the scanner)
 
 1. deploy the second token contract (asset for vault)
 2. mint 1000 tokens to signer (just for test)
