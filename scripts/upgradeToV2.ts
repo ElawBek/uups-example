@@ -4,8 +4,8 @@ import { parseEther } from "ethers/lib/utils";
 
 import {
   Token__factory,
+  VaultV1__factory,
   VaultV2__factory,
-  TransparentUpgradeableProxy__factory,
 } from "../typechain-types";
 
 const TOKEN1_ADDRESS = "0xf9bf22ad901D555e35C50AF17B933308876a3067";
@@ -23,11 +23,9 @@ async function main() {
   const implV2 = await new VaultV2__factory(signer).deploy();
   await implV2.deployed();
 
-  const TUProxy = new TransparentUpgradeableProxy__factory(signer).attach(
-    PROXY_ADDRESS
-  );
+  const vaultV1Proxy = new VaultV1__factory(signer).attach(PROXY_ADDRESS);
 
-  tx = await TUProxy.upgradeTo(implV2.address);
+  tx = await vaultV1Proxy.upgradeTo(implV2.address);
   await tx.wait();
 
   const vaultV2 = new VaultV2__factory(signer).attach(PROXY_ADDRESS);

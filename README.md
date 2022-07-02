@@ -50,7 +50,7 @@ deployV2.ts: (copy your token1 and proxy addresses from the scanner)
 1. deploy the second token contract (asset for vault)
 2. mint 1000 tokens to signer (just for test)
 3. deploy the second version of the token contract (implementation ver2)
-4. attach proxyAddress to TUP-factory and call .upgradeTo(implV2.address) method
+4. call .upgradeTo(implV2.address) method through vaultV1Proxy uups
 5. attach proxyAddress to VaultV2\_\_factory and add token2 to the supported token
 6. verify v2 impl on the scanner
 

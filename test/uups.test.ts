@@ -13,7 +13,6 @@ import {
   Token__factory,
   VaultV2,
   VaultV2__factory,
-  TransparentUpgradeableProxy__factory,
   ERC1967Proxy,
 } from "../typechain-types";
 
@@ -317,59 +316,61 @@ describe("UUPS", () => {
       ]);
     });
 
-    it("Upgrade contract", async () => {
-      implV2 = await new VaultV2__factory(owner).deploy();
+    describe("Upgrade", async () => {
+      it("Non-owner cannot upgrade implementation", async () => {
+        implV2 = await new VaultV2__factory(owner).deploy();
 
-      const TUProxy = new TransparentUpgradeableProxy__factory(owner).attach(
-        proxy.address
-      );
+        await expect(
+          vaultV1.connect(alice).upgradeTo(implV2.address)
+        ).to.revertedWith("Ownable: caller is not the owner");
+      });
 
-      await TUProxy.upgradeTo(implV2.address);
+      it("Upgrade contract", async () => {
+        implV2 = await new VaultV2__factory(owner).deploy();
 
-      vaultV2 = new VaultV2__factory(owner).attach(proxy.address);
+        await vaultV1.upgradeTo(implV2.address);
 
-      // Before the first execution of the `addToken` function
-      expect([await vaultV2.token(), await vaultV2.minAmount()]).to.deep.eq([
-        tokenTwo.address,
-        parseEther("0.1"),
-      ]);
+        vaultV2 = new VaultV2__factory(owner).attach(proxy.address);
 
-      await expect(vaultV2.addToken(tokenOne.address))
-        .to.emit(vaultV2, "TokenAdded")
-        .withArgs(tokenTwo.address)
-        .to.emit(vaultV2, "TokenAdded")
-        .withArgs(tokenOne.address);
+        // Before the first execution of the `addToken` function
+        expect([await vaultV2.token(), await vaultV2.minAmount()]).to.deep.eq([
+          tokenTwo.address,
+          parseEther("0.1"),
+        ]);
 
-      expect([
-        await vaultV2.name(), // contract's name
-        await vaultV2.token(), // deprecated variable `token`
-        await vaultV2.minAmount(), // deprecated variable `minAmount`
-        await vaultV2.totalSupply(tokenTwo.address), // totalSupply of TKN1
-        await vaultV2.totalSupply(tokenOne.address), // totalSupply of TKN2
-        await vaultV2.assets(tokenOne.address), // support of TKN1
-        await vaultV2.assets(tokenTwo.address), // support of TKN2
-        await vaultV2.assets(tokenThree.address), // support of TKN3
-      ]).to.deep.eq([
-        "Vault",
-        constants.AddressZero,
-        constants.Zero,
-        parseEther("100"),
-        parseEther("90"),
-        true,
-        true,
-        false,
-      ]);
+        await expect(vaultV2.addToken(tokenOne.address))
+          .to.emit(vaultV2, "TokenAdded")
+          .withArgs(tokenTwo.address)
+          .to.emit(vaultV2, "TokenAdded")
+          .withArgs(tokenOne.address);
+
+        expect([
+          await vaultV2.name(), // contract's name
+          await vaultV2.token(), // deprecated variable `token`
+          await vaultV2.minAmount(), // deprecated variable `minAmount`
+          await vaultV2.totalSupply(tokenTwo.address), // totalSupply of TKN1
+          await vaultV2.totalSupply(tokenOne.address), // totalSupply of TKN2
+          await vaultV2.assets(tokenOne.address), // support of TKN1
+          await vaultV2.assets(tokenTwo.address), // support of TKN2
+          await vaultV2.assets(tokenThree.address), // support of TKN3
+        ]).to.deep.eq([
+          "Vault",
+          constants.AddressZero,
+          constants.Zero,
+          parseEther("100"),
+          parseEther("90"),
+          true,
+          true,
+          false,
+        ]);
+      });
     });
 
     describe("VaultV2 functionality", () => {
       beforeEach(async () => {
         implV2 = await new VaultV2__factory(owner).deploy();
 
-        const TUProxy = new TransparentUpgradeableProxy__factory(owner).attach(
-          proxy.address
-        );
-
-        await TUProxy.upgradeTo(implV2.address);
+        await vaultV1.upgradeTo(implV2.address);
 
         vaultV2 = new VaultV2__factory(owner).attach(proxy.address);
 
