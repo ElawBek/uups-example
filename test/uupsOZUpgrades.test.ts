@@ -1,57 +1,31 @@
 import { expect } from "chai";
-import { ethers, upgrades } from "hardhat";
+import { upgrades } from "hardhat";
+import { loadFixture, time } from "@nomicfoundation/hardhat-network-helpers";
+import {
+  deployVer1Fixture,
+  deployVer2Fixture,
+  prepareForUpgradeFixture,
+} from "./helpers/fixturesOZUpgrades";
 
-import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
+import { constants } from "ethers";
 import { parseEther } from "ethers/lib/utils";
 
 import { signERC2612Permit } from "eth-permit";
 
 import {
-  VaultV1,
   VaultV1__factory,
-  Token,
-  Token__factory,
   VaultV2,
   VaultV2__factory,
 } from "../typechain-types";
 
-import { constants } from "ethers";
-
 describe("UUPS", () => {
-  let owner: SignerWithAddress;
-  let alice: SignerWithAddress;
-
-  let tokenOne: Token;
-  let tokenTwo: Token;
-
-  let vaultV1: VaultV1;
-
-  beforeEach(async () => {
-    [owner, alice] = await ethers.getSigners();
-
-    tokenOne = await new Token__factory(owner).deploy("TokenOne", "TKN1");
-    await tokenOne.mint(owner.address, parseEther("100"));
-    await tokenOne.mint(alice.address, parseEther("100"));
-
-    tokenTwo = await new Token__factory(owner).deploy("TokenTwo", "TKN2");
-    await tokenTwo.mint(owner.address, parseEther("100"));
-    await tokenTwo.mint(alice.address, parseEther("100"));
-
-    const ImplFactory = new VaultV1__factory(owner);
-
-    vaultV1 = (await upgrades.deployProxy(
-      ImplFactory,
-      [tokenOne.address, "Vault"],
-      {
-        initializer: "initialize",
-        kind: "uups",
-      }
-    )) as VaultV1;
-  });
-
   describe("1 ver", () => {
     describe("Deployment", () => {
       it("Proxy state", async () => {
+        const { vaultV1, tokenOne, owner } = await loadFixture(
+          deployVer1Fixture
+        );
+
         expect([
           await vaultV1.name(), // proxy name
           await vaultV1.token(), // current token
@@ -68,6 +42,8 @@ describe("UUPS", () => {
       });
 
       it("Origin state", async () => {
+        const { vaultV1, owner } = await loadFixture(deployVer1Fixture);
+
         const impl = await upgrades.erc1967.getImplementationAddress(
           vaultV1.address
         );
@@ -90,6 +66,8 @@ describe("UUPS", () => {
 
     describe("Initialize", () => {
       it("Address(0) init revert", async () => {
+        const { alice } = await loadFixture(deployVer1Fixture);
+
         const ImplFactory = new VaultV1__factory(alice);
 
         await expect(
@@ -101,12 +79,14 @@ describe("UUPS", () => {
               kind: "uups",
             }
           )
-        ).to.revertedWith(
-          `WrongAddress("initialize", "${constants.AddressZero}")`
-        );
+        ).to.reverted;
       });
 
       it("Origin initialize revert", async () => {
+        const { vaultV1, owner, tokenOne } = await loadFixture(
+          deployVer1Fixture
+        );
+
         const impl = await upgrades.erc1967.getImplementationAddress(
           vaultV1.address
         );
@@ -121,44 +101,51 @@ describe("UUPS", () => {
 
     describe("previewDeposit and previewWithdraw reverts", () => {
       it("previewDeposit's revert", async () => {
-        try {
-          await vaultV1.previewDeposit(tokenTwo.address, parseEther("0.1"));
-        } catch (error: any) {
-          expect(error.errorName).to.eq("WrongAddress");
-          expect(error.errorArgs).to.deep.eq([
-            "previewDeposit",
-            tokenTwo.address,
-          ]);
-        }
+        const { vaultV1, tokenTwo } = await loadFixture(deployVer1Fixture);
+
+        await expect(
+          vaultV1.previewDeposit(tokenTwo.address, parseEther("0.1"))
+        )
+          .to.revertedWithCustomError(vaultV1, "WrongAddress")
+          .withArgs("previewDeposit", tokenTwo.address);
       });
 
       it("previewWithdraw's revert", async () => {
+        const { vaultV1, tokenOne } = await loadFixture(deployVer1Fixture);
+
         // 0
         const totalSupply = await vaultV1.totalSupply(tokenOne.address);
 
-        try {
-          await vaultV1.previewWithdraw(tokenOne.address, parseEther("0.1"));
-        } catch (error: any) {
-          expect(error.errorName).to.eq("NotEnoughAmount");
-          expect(error.errorArgs).to.deep.eq(["previewWithdraw", totalSupply]);
-        }
+        await expect(
+          vaultV1.previewWithdraw(tokenOne.address, parseEther("0.1"))
+        )
+          .to.revertedWithCustomError(vaultV1, "NotEnoughAmount")
+          .withArgs("previewWithdraw", totalSupply);
       });
     });
 
     describe("Deposit functionality", () => {
       it("Revert NotEnoughAmount in deposit function", async () => {
-        await expect(vaultV1.deposit(parseEther("0.01"))).to.revertedWith(
-          `NotEnoughAmount("deposit", ${parseEther("0.01")})`
-        );
+        const { vaultV1 } = await loadFixture(deployVer1Fixture);
+
+        await expect(vaultV1.deposit(parseEther("0.01")))
+          .to.revertedWithCustomError(vaultV1, "NotEnoughAmount")
+          .withArgs("deposit", parseEther("0.01"));
       });
 
       it("ERC20: insufficient allowance revert", async () => {
+        const { vaultV1 } = await loadFixture(deployVer1Fixture);
+
         await expect(vaultV1.deposit(parseEther("0.1"))).to.revertedWith(
           "ERC20: insufficient allowance"
         );
       });
 
       it("Success deposit from two users", async () => {
+        const { vaultV1, tokenOne, alice, owner } = await loadFixture(
+          deployVer1Fixture
+        );
+
         // 10e18
         let share = await vaultV1.previewDeposit(
           tokenOne.address,
@@ -200,16 +187,26 @@ describe("UUPS", () => {
 
     describe("Withdraw functionality", () => {
       it("Revert NotEnoughAmount in withdraw function", async () => {
+        const { vaultV1, tokenOne, alice } = await loadFixture(
+          deployVer1Fixture
+        );
+
         expect(await vaultV1.balances(tokenOne.address, alice.address)).to.eq(
           constants.Zero
         );
 
         await expect(
           vaultV1.connect(alice).withdraw(tokenOne.address, parseEther("1"))
-        ).to.revertedWith(`NotEnoughAmount("withdraw", ${parseEther("1")})`);
+        )
+          .to.revertedWithCustomError(vaultV1, "NotEnoughAmount")
+          .withArgs("withdraw", parseEther("1"));
       });
 
       it("Success withdraw to two users", async () => {
+        const { vaultV1, tokenOne, alice, owner } = await loadFixture(
+          deployVer1Fixture
+        );
+
         await tokenOne
           .connect(alice)
           .approve(vaultV1.address, parseEther("10"));
@@ -244,26 +241,36 @@ describe("UUPS", () => {
 
     describe("Change token functionality", () => {
       it("Non-owner cannot change token", async () => {
+        const { vaultV1, alice, tokenTwo } = await loadFixture(
+          deployVer1Fixture
+        );
+
         await expect(
           vaultV1.connect(alice).changeToken(tokenTwo.address)
         ).to.revertedWith("Ownable: caller is not the owner");
       });
 
       it("Revert WrongAddress - address(0)", async () => {
-        await expect(
-          vaultV1.changeToken(constants.AddressZero)
-        ).to.revertedWith(
-          `WrongAddress("changeToken", "${constants.AddressZero}")`
-        );
+        const { vaultV1 } = await loadFixture(deployVer1Fixture);
+
+        await expect(vaultV1.changeToken(constants.AddressZero))
+          .to.revertedWithCustomError(vaultV1, "WrongAddress")
+          .withArgs("changeToken", constants.AddressZero);
       });
 
       it("Revert WrongAddress - current token", async () => {
-        await expect(vaultV1.changeToken(tokenOne.address)).to.revertedWith(
-          `WrongAddress("changeToken", "${tokenOne.address}")`
-        );
+        const { vaultV1, tokenOne } = await loadFixture(deployVer1Fixture);
+
+        await expect(vaultV1.changeToken(tokenOne.address))
+          .to.revertedWithCustomError(vaultV1, "WrongAddress")
+          .withArgs("changeToken", tokenOne.address);
       });
 
       it("Change token", async () => {
+        const { vaultV1, tokenOne, owner, tokenTwo } = await loadFixture(
+          deployVer1Fixture
+        );
+
         // deposit some old tokens
         await tokenOne.approve(vaultV1.address, parseEther("100"));
         await vaultV1.deposit(parseEther("100"));
@@ -304,48 +311,19 @@ describe("UUPS", () => {
   });
 
   describe("2 ver", () => {
-    let tokenThree: Token;
+    it("Upgrade implementation", async () => {
+      const { tokenOne, tokenTwo, owner, vaultV1, tokenThree } =
+        await loadFixture(prepareForUpgradeFixture);
 
-    let vaultV2: VaultV2;
-
-    beforeEach(async () => {
-      tokenThree = await new Token__factory(owner).deploy("TokenThree", "TKN3");
-      await tokenThree.mint(owner.address, parseEther("1000"));
-      await tokenThree.mint(alice.address, parseEther("1000"));
-
-      // do some actions with vault ver 1
-      await tokenOne.connect(alice).approve(vaultV1.address, parseEther("100"));
-      await tokenTwo.connect(owner).approve(vaultV1.address, parseEther("100"));
-
-      await vaultV1.connect(alice).deposit(parseEther("100"));
-
-      await vaultV1.changeToken(tokenTwo.address);
-
-      await vaultV1.connect(owner).deposit(parseEther("100"));
-
-      await vaultV1.connect(alice).withdraw(tokenOne.address, parseEther("10"));
-    });
-
-    it("Ver 1 state", async () => {
-      expect([
-        await vaultV1.token(), // current token
-        await vaultV1.totalSupply(tokenTwo.address), // totalSupply of TKN1
-        await vaultV1.totalSupply(tokenOne.address), // totalSupply of TKN2
-        await vaultV1.owner(), // contract's owner
-      ]).to.deep.eq([
-        tokenTwo.address,
-        parseEther("100"),
-        parseEther("90"),
-        owner.address,
-      ]);
-    });
-
-    it("Upgrade contract", async () => {
       const ImplFactory = new VaultV2__factory(owner);
 
-      vaultV2 = (await upgrades.upgradeProxy(vaultV1.address, ImplFactory, {
-        kind: "uups",
-      })) as VaultV2;
+      const vaultV2 = (await upgrades.upgradeProxy(
+        vaultV1.address,
+        ImplFactory,
+        {
+          kind: "uups",
+        }
+      )) as VaultV2;
 
       // Before the first execution of the `addToken` function
       expect([await vaultV2.token(), await vaultV2.minAmount()]).to.deep.eq([
@@ -381,36 +359,36 @@ describe("UUPS", () => {
     });
 
     describe("VaultV2 functionality", () => {
-      beforeEach(async () => {
-        const ImplFactory = new VaultV2__factory(owner);
-
-        vaultV2 = (await upgrades.upgradeProxy(vaultV1.address, ImplFactory, {
-          kind: "uups",
-        })) as VaultV2;
-
-        await vaultV2.addToken(tokenOne.address);
-      });
-
       describe("Add token function", () => {
         it("Non-owner cannot add new token", async () => {
+          const { vaultV2, alice, tokenOne } = await loadFixture(
+            deployVer2Fixture
+          );
+
           await expect(
             vaultV2.connect(alice).addToken(tokenOne.address)
           ).to.revertedWith("Ownable: caller is not the owner");
         });
 
         it("Revert WrongAddress - address(0)", async () => {
-          await expect(vaultV2.addToken(constants.AddressZero)).to.revertedWith(
-            `WrongAddress("addToken", "${constants.AddressZero}")`
-          );
+          const { vaultV2 } = await loadFixture(deployVer2Fixture);
+
+          await expect(vaultV2.addToken(constants.AddressZero))
+            .to.revertedWithCustomError(vaultV2, "WrongAddress")
+            .withArgs("addToken", constants.AddressZero);
         });
 
         it("Revert WrongAddress - already supported token", async () => {
-          await expect(vaultV2.addToken(tokenOne.address)).to.revertedWith(
-            `WrongAddress("addToken", "${tokenOne.address}")`
-          );
+          const { vaultV2, tokenOne } = await loadFixture(deployVer2Fixture);
+
+          await expect(vaultV2.addToken(tokenOne.address))
+            .to.revertedWithCustomError(vaultV2, "WrongAddress")
+            .withArgs("addToken", tokenOne.address);
         });
 
         it("Add tokenThree to supported tokens", async () => {
+          const { vaultV2, tokenThree } = await loadFixture(deployVer2Fixture);
+
           await expect(vaultV2.addToken(tokenThree.address))
             .to.emit(vaultV2, "TokenAdded")
             .withArgs(tokenThree.address);
@@ -421,39 +399,40 @@ describe("UUPS", () => {
 
       describe("previewDeposit's revert", () => {
         it("previewDeposit's revert", async () => {
-          try {
-            await vaultV2.previewDeposit(tokenThree.address, parseEther("0.1"));
-          } catch (error: any) {
-            expect(error.errorName).to.eq("WrongAddress");
-            expect(error.errorArgs).to.deep.eq([
-              "previewDeposit",
-              tokenThree.address,
-            ]);
-          }
+          const { vaultV2, tokenThree } = await loadFixture(deployVer2Fixture);
+
+          await expect(
+            vaultV2.previewDeposit(tokenThree.address, parseEther("0.1"))
+          )
+            .to.revertedWithCustomError(vaultV2, "WrongAddress")
+            .withArgs("previewDeposit", tokenThree.address);
         });
       });
 
       describe("Deposit functionality", async () => {
         describe("Deposit", () => {
           it("Revert NotEnoughAmount", async () => {
-            await expect(
-              vaultV2.deposit(tokenOne.address, parseEther("0.01"))
-            ).to.revertedWith(
-              `NotEnoughAmount("deposit", ${parseEther("0.01")}, "${
-                tokenOne.address
-              }")`
-            );
+            const { vaultV2, tokenOne } = await loadFixture(deployVer2Fixture);
+
+            await expect(vaultV2.deposit(tokenOne.address, parseEther("0.01")))
+              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
+              .withArgs("deposit", parseEther("0.01"), tokenOne.address);
           });
 
           it("Revert WrongAddress - unsupported token", async () => {
-            await expect(
-              vaultV2.deposit(tokenThree.address, parseEther("0.1"))
-            ).to.revertedWith(
-              `WrongAddress("deposit", "${tokenThree.address}")`
+            const { vaultV2, tokenThree } = await loadFixture(
+              deployVer2Fixture
             );
+
+            await expect(vaultV2.deposit(tokenThree.address, parseEther("0.1")))
+              .to.revertedWithCustomError(vaultV2, "WrongAddress")
+              .withArgs("deposit", tokenThree.address);
           });
 
           it("Deposit two different tokens", async () => {
+            const { vaultV2, tokenOne, tokenTwo, alice, owner } =
+              await loadFixture(deployVer2Fixture);
+
             await tokenOne.approve(vaultV2.address, parseEther("100"));
             await tokenTwo
               .connect(alice)
@@ -485,6 +464,10 @@ describe("UUPS", () => {
           });
 
           it("Deposit token after adding support", async () => {
+            const { vaultV2, tokenThree } = await loadFixture(
+              deployVer2Fixture
+            );
+
             await expect(vaultV2.addToken(tokenThree.address))
               .to.emit(vaultV2, "TokenAdded")
               .withArgs(tokenThree.address);
@@ -499,9 +482,12 @@ describe("UUPS", () => {
 
         describe("Deposit by signature", () => {
           it("Revert NotEnoughAmount", async () => {
-            // 20 minutes
-            const deadline =
-              (await ethers.provider.getBlock("latest")).timestamp + 1200;
+            const { vaultV2, owner, tokenOne } = await loadFixture(
+              deployVer2Fixture
+            );
+
+            // 20 mins
+            const deadline = (await time.latest()) + 1200;
 
             const signature = await signERC2612Permit(
               owner, // provider (signer)
@@ -521,17 +507,18 @@ describe("UUPS", () => {
                 signature.r,
                 signature.s
               )
-            ).to.revertedWith(
-              `NotEnoughAmount("deposit", ${parseEther("0.01")}, "${
-                tokenOne.address
-              }")`
-            );
+            )
+              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
+              .withArgs("deposit", parseEther("0.01"), tokenOne.address);
           });
 
           it("Revert WrongAddress - unsupported token", async () => {
-            // 20 minutes
-            const deadline =
-              (await ethers.provider.getBlock("latest")).timestamp + 1200;
+            const { vaultV2, owner, tokenThree } = await loadFixture(
+              deployVer2Fixture
+            );
+
+            // 20 mins
+            const deadline = (await time.latest()) + 1200;
 
             const signature = await signERC2612Permit(
               owner, // provider (signer)
@@ -551,14 +538,17 @@ describe("UUPS", () => {
                 signature.r,
                 signature.s
               )
-            ).to.revertedWith(
-              `WrongAddress("deposit", "${tokenThree.address}")`
-            );
+            )
+              .to.revertedWithCustomError(vaultV2, "WrongAddress")
+              .withArgs("deposit", tokenThree.address);
           });
 
           it("Deposit two different tokens by signature", async () => {
-            const deadline =
-              (await ethers.provider.getBlock("latest")).timestamp + 1200;
+            const { vaultV2, owner, tokenOne, alice, tokenTwo } =
+              await loadFixture(deployVer2Fixture);
+
+            // 20 mins
+            const deadline = (await time.latest()) + 1200;
 
             let signature = await signERC2612Permit(
               owner, // provider (signer)
@@ -622,32 +612,39 @@ describe("UUPS", () => {
 
         describe("Withdraw functionality", () => {
           it("Revert NotEnoughAmount in withdraw function", async () => {
+            const { vaultV2, alice, tokenTwo } = await loadFixture(
+              deployVer2Fixture
+            );
+
             expect(
               await vaultV2.balances(tokenTwo.address, alice.address)
             ).to.eq(constants.Zero);
 
             await expect(
               vaultV2.connect(alice).withdraw(tokenTwo.address, parseEther("1"))
-            ).to.revertedWith(
-              `NotEnoughAmount("withdraw", ${parseEther("1")}, "${
-                tokenTwo.address
-              }")`
-            );
+            )
+              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
+              .withArgs("withdraw", parseEther("1"), tokenTwo.address);
           });
 
           it("Revert NotEnoughAmount in withdraw function with unsupported token", async () => {
+            const { vaultV2, alice, tokenThree } = await loadFixture(
+              deployVer2Fixture
+            );
+
             await expect(
               vaultV2
                 .connect(alice)
                 .withdraw(tokenThree.address, parseEther("1"))
-            ).to.revertedWith(
-              `NotEnoughAmount("withdraw", ${parseEther("1")}, "${
-                tokenThree.address
-              }")`
-            );
+            )
+              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
+              .withArgs("withdraw", parseEther("1"), tokenThree.address);
           });
 
           it("Success withdraw to two users", async () => {
+            const { vaultV2, alice, tokenTwo, owner, tokenOne } =
+              await loadFixture(deployVer2Fixture);
+
             await expect(vaultV2.withdraw(tokenTwo.address, parseEther("1")))
               .to.emit(vaultV2, "Withdrawal")
               .withArgs(owner.address, tokenTwo.address, parseEther("1"));
