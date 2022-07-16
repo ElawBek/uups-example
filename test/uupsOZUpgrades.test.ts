@@ -1,40 +1,57 @@
 import { expect } from "chai";
 import { upgrades } from "hardhat";
-import { loadFixture, time } from "@nomicfoundation/hardhat-network-helpers";
-import {
-  deployVer1Fixture,
-  deployVer2Fixture,
-  prepareForUpgradeFixture,
-} from "./helpers/fixturesOZUpgrades";
+import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
+import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/signers";
 
 import { constants } from "ethers";
 import { parseEther } from "ethers/lib/utils";
 
+import {
+  deployVersionOneUpgradesFixture,
+  deployVersionTwoUpgradesFixture,
+} from "./fixtures";
+
 import { signERC2612Permit } from "eth-permit";
 
 import {
-  VaultV1__factory,
+  VaultV1,
   VaultV2,
+  Token,
   VaultV2__factory,
+  VaultV1__factory,
 } from "../typechain-types";
 
-describe("UUPS", () => {
+describe("UUPS upgrades", () => {
+  let owner: SignerWithAddress;
+  let alice: SignerWithAddress;
+
+  let token0: Token;
+  let token1: Token;
+  let token2: Token;
+
+  let implV1: VaultV1;
+  let implV2: VaultV2;
+
   describe("1 ver", () => {
+    let vaultV1Proxy: VaultV1;
+
+    beforeEach(async () => {
+      ({ owner, alice, token0, token1, vaultV1Proxy } = await loadFixture(
+        deployVersionOneUpgradesFixture
+      ));
+    });
+
     describe("Deployment", () => {
       it("Proxy state", async () => {
-        const { vaultV1, tokenOne, owner } = await loadFixture(
-          deployVer1Fixture
-        );
-
         expect([
-          await vaultV1.name(), // proxy name
-          await vaultV1.token(), // current token
-          await vaultV1.minAmount(), // minimum amount of token for deposit
-          await vaultV1.totalSupply(tokenOne.address), // totalSupply of current token
-          await vaultV1.owner(), // contract's owner
+          await vaultV1Proxy.name(), // proxy name
+          await vaultV1Proxy.token(), // current token
+          await vaultV1Proxy.minAmount(), // minimum amount of token for deposit
+          await vaultV1Proxy.totalSupply(token0.address), // totalSupply of current token
+          await vaultV1Proxy.owner(), // contract's owner
         ]).to.deep.eq([
           "Vault",
-          tokenOne.address,
+          token0.address,
           parseEther("0.1"),
           constants.Zero,
           owner.address,
@@ -42,10 +59,8 @@ describe("UUPS", () => {
       });
 
       it("Origin state", async () => {
-        const { vaultV1, owner } = await loadFixture(deployVer1Fixture);
-
         const impl = await upgrades.erc1967.getImplementationAddress(
-          vaultV1.address
+          vaultV1Proxy.address
         );
 
         const originContract = new VaultV1__factory(owner).attach(impl);
@@ -62,614 +77,430 @@ describe("UUPS", () => {
           constants.AddressZero,
         ]);
       });
-    });
-
-    describe("Initialize", () => {
-      it("Address(0) init revert", async () => {
-        const { alice } = await loadFixture(deployVer1Fixture);
-
-        const ImplFactory = new VaultV1__factory(alice);
-
-        await expect(
-          upgrades.deployProxy(
-            ImplFactory,
-            [constants.AddressZero, "VaultTest"],
-            {
-              initializer: "initialize",
-              kind: "uups",
-            }
-          )
-        ).to.reverted;
-      });
 
       it("Origin initialize revert", async () => {
-        const { vaultV1, owner, tokenOne } = await loadFixture(
-          deployVer1Fixture
-        );
-
         const impl = await upgrades.erc1967.getImplementationAddress(
-          vaultV1.address
+          vaultV1Proxy.address
         );
 
         const originContract = new VaultV1__factory(owner).attach(impl);
 
         await expect(
-          originContract.initialize(tokenOne.address, "VaultError")
+          originContract.initialize(token0.address, "VaultError")
         ).to.revertedWith("Initializable: contract is already initialized");
       });
     });
 
-    describe("previewDeposit and previewWithdraw reverts", () => {
-      it("previewDeposit's revert", async () => {
-        const { vaultV1, tokenTwo } = await loadFixture(deployVer1Fixture);
-
+    describe("Admin action #changeToken", () => {
+      it("Ownable check", async () => {
         await expect(
-          vaultV1.previewDeposit(tokenTwo.address, parseEther("0.1"))
-        )
-          .to.revertedWithCustomError(vaultV1, "WrongAddress")
-          .withArgs("previewDeposit", tokenTwo.address);
-      });
-
-      it("previewWithdraw's revert", async () => {
-        const { vaultV1, tokenOne } = await loadFixture(deployVer1Fixture);
-
-        // 0
-        const totalSupply = await vaultV1.totalSupply(tokenOne.address);
-
-        await expect(
-          vaultV1.previewWithdraw(tokenOne.address, parseEther("0.1"))
-        )
-          .to.revertedWithCustomError(vaultV1, "NotEnoughAmount")
-          .withArgs("previewWithdraw", totalSupply);
-      });
-    });
-
-    describe("Deposit functionality", () => {
-      it("Revert NotEnoughAmount in deposit function", async () => {
-        const { vaultV1 } = await loadFixture(deployVer1Fixture);
-
-        await expect(vaultV1.deposit(parseEther("0.01")))
-          .to.revertedWithCustomError(vaultV1, "NotEnoughAmount")
-          .withArgs("deposit", parseEther("0.01"));
-      });
-
-      it("ERC20: insufficient allowance revert", async () => {
-        const { vaultV1 } = await loadFixture(deployVer1Fixture);
-
-        await expect(vaultV1.deposit(parseEther("0.1"))).to.revertedWith(
-          "ERC20: insufficient allowance"
-        );
-      });
-
-      it("Success deposit from two users", async () => {
-        const { vaultV1, tokenOne, alice, owner } = await loadFixture(
-          deployVer1Fixture
-        );
-
-        // 10e18
-        let share = await vaultV1.previewDeposit(
-          tokenOne.address,
-          parseEther("10")
-        );
-
-        await tokenOne
-          .connect(alice)
-          .approve(vaultV1.address, parseEther("10"));
-
-        await expect(vaultV1.connect(alice).deposit(parseEther("10")))
-          .to.emit(vaultV1, "Deposit")
-          .withArgs(alice.address, tokenOne.address, share);
-
-        expect([
-          await vaultV1.totalSupply(tokenOne.address),
-          await vaultV1.balances(tokenOne.address, alice.address),
-        ]).to.deep.eq([parseEther("10"), share]);
-
-        // shares = amount * TotalSupply / Balance before deposit
-        // shares = 100e18 * 10e18 / 10e18 = 100e18 (just 1:1)
-        share = await vaultV1.previewDeposit(
-          tokenOne.address,
-          parseEther("100")
-        );
-
-        await tokenOne.approve(vaultV1.address, parseEther("100"));
-
-        await expect(vaultV1.deposit(parseEther("100")))
-          .to.emit(vaultV1, "Deposit")
-          .withArgs(owner.address, tokenOne.address, share);
-
-        expect([
-          await vaultV1.totalSupply(tokenOne.address),
-          await vaultV1.balances(tokenOne.address, owner.address),
-        ]).to.deep.eq([parseEther("110"), share]);
-      });
-    });
-
-    describe("Withdraw functionality", () => {
-      it("Revert NotEnoughAmount in withdraw function", async () => {
-        const { vaultV1, tokenOne, alice } = await loadFixture(
-          deployVer1Fixture
-        );
-
-        expect(await vaultV1.balances(tokenOne.address, alice.address)).to.eq(
-          constants.Zero
-        );
-
-        await expect(
-          vaultV1.connect(alice).withdraw(tokenOne.address, parseEther("1"))
-        )
-          .to.revertedWithCustomError(vaultV1, "NotEnoughAmount")
-          .withArgs("withdraw", parseEther("1"));
-      });
-
-      it("Success withdraw to two users", async () => {
-        const { vaultV1, tokenOne, alice, owner } = await loadFixture(
-          deployVer1Fixture
-        );
-
-        await tokenOne
-          .connect(alice)
-          .approve(vaultV1.address, parseEther("10"));
-        await tokenOne.approve(vaultV1.address, parseEther("100"));
-
-        await vaultV1.connect(alice).deposit(parseEther("10"));
-        await vaultV1.deposit(parseEther("100"));
-
-        expect([
-          await vaultV1.totalSupply(tokenOne.address),
-          await vaultV1.balances(tokenOne.address, owner.address),
-          await vaultV1.balances(tokenOne.address, alice.address),
-        ]).to.deep.eq([parseEther("110"), parseEther("100"), parseEther("10")]);
-
-        await expect(
-          vaultV1.connect(alice).withdraw(tokenOne.address, parseEther("1"))
-        )
-          .to.emit(vaultV1, "Withdrawal")
-          .withArgs(alice.address, tokenOne.address, parseEther("1"));
-
-        await expect(vaultV1.withdraw(tokenOne.address, parseEther("10")))
-          .to.emit(vaultV1, "Withdrawal")
-          .withArgs(owner.address, tokenOne.address, parseEther("10"));
-
-        expect([
-          await vaultV1.totalSupply(tokenOne.address),
-          await vaultV1.balances(tokenOne.address, owner.address),
-          await vaultV1.balances(tokenOne.address, alice.address),
-        ]).to.deep.eq([parseEther("99"), parseEther("90"), parseEther("9")]);
-      });
-    });
-
-    describe("Change token functionality", () => {
-      it("Non-owner cannot change token", async () => {
-        const { vaultV1, alice, tokenTwo } = await loadFixture(
-          deployVer1Fixture
-        );
-
-        await expect(
-          vaultV1.connect(alice).changeToken(tokenTwo.address)
+          vaultV1Proxy.connect(alice).changeToken(token1.address)
         ).to.revertedWith("Ownable: caller is not the owner");
       });
 
-      it("Revert WrongAddress - address(0)", async () => {
-        const { vaultV1 } = await loadFixture(deployVer1Fixture);
-
-        await expect(vaultV1.changeToken(constants.AddressZero))
-          .to.revertedWithCustomError(vaultV1, "WrongAddress")
+      it("Attempt to change to the addressZero", async () => {
+        await expect(
+          vaultV1Proxy.connect(owner).changeToken(constants.AddressZero)
+        )
+          .to.revertedWithCustomError(vaultV1Proxy, "WrongAddress")
           .withArgs("changeToken", constants.AddressZero);
       });
 
-      it("Revert WrongAddress - current token", async () => {
-        const { vaultV1, tokenOne } = await loadFixture(deployVer1Fixture);
-
-        await expect(vaultV1.changeToken(tokenOne.address))
-          .to.revertedWithCustomError(vaultV1, "WrongAddress")
-          .withArgs("changeToken", tokenOne.address);
+      it("Attempt to change to the same token", async () => {
+        await expect(vaultV1Proxy.connect(owner).changeToken(token0.address))
+          .to.revertedWithCustomError(vaultV1Proxy, "WrongAddress")
+          .withArgs("changeToken", token0.address);
       });
 
-      it("Change token", async () => {
-        const { vaultV1, tokenOne, owner, tokenTwo } = await loadFixture(
-          deployVer1Fixture
+      it("Emit `TokenChanged` event", async () => {
+        await expect(vaultV1Proxy.connect(owner).changeToken(token1.address))
+          .to.emit(vaultV1Proxy, "TokenChanged")
+          .withArgs(token0.address, token1.address, parseEther("0.1"));
+
+        expect(await vaultV1Proxy.token()).to.eq(token1.address);
+        expect(await vaultV1Proxy.minAmount()).to.eq(parseEther("0.1"));
+      });
+    });
+
+    describe("#deposit", () => {
+      it("Insufficient number of tokens should revert", async () => {
+        await expect(vaultV1Proxy.connect(alice).deposit(42))
+          .to.revertedWithCustomError(vaultV1Proxy, "NotEnoughAmount")
+          .withArgs("deposit", 42);
+      });
+
+      it("Token transfer failed", async () => {
+        await expect(
+          vaultV1Proxy.connect(alice).deposit(parseEther("0.1"))
+        ).to.revertedWith("ERC20: insufficient allowance");
+      });
+
+      it("Successful deposit and emit `Deposit` event", async () => {
+        await expect(vaultV1Proxy.connect(owner).deposit(parseEther("10")))
+          .to.emit(vaultV1Proxy, "Deposit")
+          .withArgs(owner.address, token0.address, parseEther("10"));
+
+        // State changes:
+        expect(await vaultV1Proxy.totalSupply(token0.address)).to.eq(
+          parseEther("10")
         );
+        expect(
+          await vaultV1Proxy.balances(token0.address, owner.address)
+        ).to.eq(parseEther("10"));
+      });
+    });
 
-        // deposit some old tokens
-        await tokenOne.approve(vaultV1.address, parseEther("100"));
-        await vaultV1.deposit(parseEther("100"));
+    describe("#withdraw", () => {
+      beforeEach(async () => {
+        await vaultV1Proxy.connect(owner).deposit(parseEther("10"));
+      });
 
-        expect(await vaultV1.balances(tokenOne.address, owner.address)).to.eq(
-          parseEther("100")
+      it("Insufficient user balance should revert", async () => {
+        expect(
+          await vaultV1Proxy.balances(token0.address, alice.address)
+        ).to.eq(0);
+
+        await expect(vaultV1Proxy.connect(alice).withdraw(token0.address, 42))
+          .to.revertedWithCustomError(vaultV1Proxy, "NotEnoughAmount")
+          .withArgs("withdraw", 42);
+      });
+
+      it("Successful withdraw emit `Withdrawal` event", async () => {
+        await expect(
+          vaultV1Proxy.connect(owner).withdraw(token0.address, parseEther("5"))
+        )
+          .to.emit(vaultV1Proxy, "Withdrawal")
+          .withArgs(owner.address, token0.address, parseEther("5"));
+
+        // State changes:
+        expect(await vaultV1Proxy.totalSupply(token0.address)).to.eq(
+          parseEther("5")
         );
+        expect(
+          await vaultV1Proxy.balances(token0.address, owner.address)
+        ).to.eq(parseEther("5"));
+      });
 
-        await expect(vaultV1.changeToken(tokenTwo.address))
-          .to.emit(vaultV1, "TokenChanged")
-          .withArgs(tokenOne.address, tokenTwo.address, parseEther("0.1"));
+      it("Successful withdraw token0 after change token to token1", async () => {
+        await vaultV1Proxy.connect(owner).changeToken(token1.address);
+
+        await expect(
+          vaultV1Proxy.connect(owner).withdraw(token0.address, parseEther("5"))
+        )
+          .to.emit(vaultV1Proxy, "Withdrawal")
+          .withArgs(owner.address, token0.address, parseEther("5"));
+
+        // State changes:
+        expect(await vaultV1Proxy.totalSupply(token0.address)).to.eq(
+          parseEther("5")
+        );
+        expect(
+          await vaultV1Proxy.balances(token0.address, owner.address)
+        ).to.eq(parseEther("5"));
+      });
+    });
+
+    describe("Preview functions reverts", () => {
+      it("#previewDeposit", async () => {
+        await expect(
+          vaultV1Proxy.connect(alice).previewDeposit(token1.address, 42)
+        )
+          .to.revertedWithCustomError(vaultV1Proxy, "WrongAddress")
+          .withArgs("previewDeposit", token1.address);
+      });
+
+      it("#previewWithdraw", async () => {
+        await expect(
+          vaultV1Proxy.connect(alice).previewWithdraw(token0.address, 42)
+        )
+          .to.revertedWithCustomError(vaultV1Proxy, "NotEnoughAmount")
+          .withArgs("previewWithdraw", 0);
+      });
+    });
+
+    describe("#upgrade", () => {
+      beforeEach(async () => {
+        implV2 = await new VaultV2__factory(owner).deploy();
+      });
+
+      it("Ownable check", async () => {
+        await expect(
+          vaultV1Proxy.connect(alice).upgradeTo(implV2.address)
+        ).to.revertedWith("Ownable: caller is not the owner");
+      });
+
+      it("Successful upgrade", async () => {
+        const currentToken = await vaultV1Proxy.token();
+
+        const data = implV2.interface.encodeFunctionData("addToken", [
+          currentToken,
+        ]);
+
+        await vaultV1Proxy
+          .connect(owner)
+          .upgradeToAndCall(implV2.address, data);
+
+        const v2 = new VaultV2__factory(owner).attach(vaultV1Proxy.address);
 
         expect([
-          await vaultV1.token(), // new token
-          await vaultV1.totalSupply(tokenOne.address), // total supply of the old token
-        ]).to.deep.eq([tokenTwo.address, parseEther("100")]);
-
-        // deposit new tokens and withdraw old
-        await tokenTwo.approve(vaultV1.address, parseEther("100"));
-        await expect(vaultV1.deposit(parseEther("100")))
-          .to.emit(vaultV1, "Deposit")
-          .withArgs(owner.address, tokenTwo.address, parseEther("100"));
-
-        expect(await vaultV1.totalSupply(tokenTwo.address)).to.eq(
-          parseEther("100")
-        );
-
-        await expect(() => vaultV1.withdraw(tokenOne.address, parseEther("10")))
-          .to.emit(vaultV1, "Withdrawal")
-          .withArgs(owner.address, tokenOne.address, parseEther("10"))
-          .to.changeTokenBalance(tokenOne, owner, parseEther("10"));
-
-        expect(await vaultV1.totalSupply(tokenOne.address)).to.eq(
-          parseEther("90")
-        );
+          await v2.token(),
+          await v2.minAmount(),
+          await v2.assets(currentToken),
+        ]).to.deep.eq([constants.AddressZero, constants.Zero, true]);
       });
     });
   });
 
   describe("2 ver", () => {
-    it("Upgrade implementation", async () => {
-      const { tokenOne, tokenTwo, owner, vaultV1, tokenThree } =
-        await loadFixture(prepareForUpgradeFixture);
+    let vaultV2Proxy: VaultV2;
 
-      const ImplFactory = new VaultV2__factory(owner);
-
-      const vaultV2 = (await upgrades.upgradeProxy(
-        vaultV1.address,
-        ImplFactory,
-        {
-          kind: "uups",
-        }
-      )) as VaultV2;
-
-      // Before the first execution of the `addToken` function
-      expect([await vaultV2.token(), await vaultV2.minAmount()]).to.deep.eq([
-        tokenTwo.address,
-        parseEther("0.1"),
-      ]);
-
-      await expect(vaultV2.addToken(tokenOne.address))
-        .to.emit(vaultV2, "TokenAdded")
-        .withArgs(tokenTwo.address)
-        .to.emit(vaultV2, "TokenAdded")
-        .withArgs(tokenOne.address);
-
-      expect([
-        await vaultV2.name(), // contract's name
-        await vaultV2.token(), // deprecated variable `token`
-        await vaultV2.minAmount(), // deprecated variable `minAmount`
-        await vaultV2.totalSupply(tokenTwo.address), // totalSupply of TKN1
-        await vaultV2.totalSupply(tokenOne.address), // totalSupply of TKN2
-        await vaultV2.assets(tokenOne.address), // support of TKN1
-        await vaultV2.assets(tokenTwo.address), // support of TKN2
-        await vaultV2.assets(tokenThree.address), // support of TKN3
-      ]).to.deep.eq([
-        "Vault",
-        constants.AddressZero,
-        constants.Zero,
-        parseEther("100"),
-        parseEther("90"),
-        true,
-        true,
-        false,
-      ]);
+    beforeEach(async () => {
+      ({ owner, alice, token0, token1, token2, vaultV2Proxy } =
+        await loadFixture(deployVersionTwoUpgradesFixture));
     });
 
-    describe("VaultV2 functionality", () => {
-      describe("Add token function", () => {
-        it("Non-owner cannot add new token", async () => {
-          const { vaultV2, alice, tokenOne } = await loadFixture(
-            deployVer2Fixture
-          );
+    describe("Deployment", () => {
+      it("New proxy state", async () => {
+        expect([
+          await vaultV2Proxy.owner(),
+          await vaultV2Proxy.name(),
+          await vaultV2Proxy.token(),
+          await vaultV2Proxy.minAmount(),
+          await vaultV2Proxy.assets(token1.address),
+          await vaultV2Proxy.totalSupply(token0.address),
+          await vaultV2Proxy.totalSupply(token1.address),
+        ]).to.deep.eq([
+          owner.address,
+          "Vault",
+          constants.AddressZero,
+          constants.Zero,
+          true,
+          parseEther("150"),
+          parseEther("50"),
+        ]);
+      });
+    });
 
-          await expect(
-            vaultV2.connect(alice).addToken(tokenOne.address)
-          ).to.revertedWith("Ownable: caller is not the owner");
-        });
-
-        it("Revert WrongAddress - address(0)", async () => {
-          const { vaultV2 } = await loadFixture(deployVer2Fixture);
-
-          await expect(vaultV2.addToken(constants.AddressZero))
-            .to.revertedWithCustomError(vaultV2, "WrongAddress")
-            .withArgs("addToken", constants.AddressZero);
-        });
-
-        it("Revert WrongAddress - already supported token", async () => {
-          const { vaultV2, tokenOne } = await loadFixture(deployVer2Fixture);
-
-          await expect(vaultV2.addToken(tokenOne.address))
-            .to.revertedWithCustomError(vaultV2, "WrongAddress")
-            .withArgs("addToken", tokenOne.address);
-        });
-
-        it("Add tokenThree to supported tokens", async () => {
-          const { vaultV2, tokenThree } = await loadFixture(deployVer2Fixture);
-
-          await expect(vaultV2.addToken(tokenThree.address))
-            .to.emit(vaultV2, "TokenAdded")
-            .withArgs(tokenThree.address);
-
-          expect(await vaultV2.assets(tokenThree.address)).to.eq(true);
-        });
+    describe("Owner actions #addToken", async () => {
+      it("Ownable check", async () => {
+        await expect(
+          vaultV2Proxy.connect(alice).addToken(token0.address)
+        ).to.revertedWith("Ownable: caller is not the owner");
       });
 
-      describe("previewDeposit's revert", () => {
-        it("previewDeposit's revert", async () => {
-          const { vaultV2, tokenThree } = await loadFixture(deployVer2Fixture);
-
-          await expect(
-            vaultV2.previewDeposit(tokenThree.address, parseEther("0.1"))
-          )
-            .to.revertedWithCustomError(vaultV2, "WrongAddress")
-            .withArgs("previewDeposit", tokenThree.address);
-        });
+      it("New token is address zero", async () => {
+        await expect(
+          vaultV2Proxy.connect(owner).addToken(constants.AddressZero)
+        )
+          .to.revertedWithCustomError(vaultV2Proxy, "WrongAddress")
+          .withArgs("addToken", constants.AddressZero);
       });
 
-      describe("Deposit functionality", async () => {
-        describe("Deposit", () => {
-          it("Revert NotEnoughAmount", async () => {
-            const { vaultV2, tokenOne } = await loadFixture(deployVer2Fixture);
+      it("New token is already supported", async () => {
+        await expect(vaultV2Proxy.connect(owner).addToken(token1.address))
+          .to.revertedWithCustomError(vaultV2Proxy, "WrongAddress")
+          .withArgs("addToken", token1.address);
+      });
 
-            await expect(vaultV2.deposit(tokenOne.address, parseEther("0.01")))
-              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
-              .withArgs("deposit", parseEther("0.01"), tokenOne.address);
-          });
+      it("Emit `TokenAdded` event", async () => {
+        await expect(vaultV2Proxy.connect(owner).addToken(token0.address))
+          .to.emit(vaultV2Proxy, "TokenAdded")
+          .withArgs(token0.address);
 
-          it("Revert WrongAddress - unsupported token", async () => {
-            const { vaultV2, tokenThree } = await loadFixture(
-              deployVer2Fixture
-            );
+        expect(await vaultV2Proxy.assets(token0.address)).to.eq(true);
+      });
+    });
 
-            await expect(vaultV2.deposit(tokenThree.address, parseEther("0.1")))
-              .to.revertedWithCustomError(vaultV2, "WrongAddress")
-              .withArgs("deposit", tokenThree.address);
-          });
+    describe("#deposit", async () => {
+      beforeEach(async () => {
+        await vaultV2Proxy.connect(owner).addToken(token0.address);
+      });
 
-          it("Deposit two different tokens", async () => {
-            const { vaultV2, tokenOne, tokenTwo, alice, owner } =
-              await loadFixture(deployVer2Fixture);
+      it("Attempt to deposit the unsupported token should revert", async () => {
+        await expect(
+          vaultV2Proxy.connect(alice).deposit(token2.address, parseEther("1"))
+        )
+          .to.revertedWithCustomError(vaultV2Proxy, "WrongAddress")
+          .withArgs("deposit", token2.address);
+      });
 
-            await tokenOne.approve(vaultV2.address, parseEther("100"));
-            await tokenTwo
-              .connect(alice)
-              .approve(vaultV2.address, parseEther("100"));
+      it("Insufficient number of tokens should revert", async () => {
+        await expect(vaultV2Proxy.connect(alice).deposit(token2.address, 42))
+          .to.revertedWithCustomError(vaultV2Proxy, "NotEnoughAmount")
+          .withArgs("deposit", 42, token2.address);
+      });
 
-            await expect(vaultV2.deposit(tokenOne.address, parseEther("100")))
-              .to.emit(vaultV2, "Deposit")
-              .withArgs(owner.address, tokenOne.address, parseEther("100"));
+      it("Transfer failed", async () => {
+        await expect(
+          vaultV2Proxy.connect(owner).deposit(token0.address, parseEther("1"))
+        ).to.revertedWith("ERC20: insufficient allowance");
+      });
 
-            await expect(
-              vaultV2
-                .connect(alice)
-                .deposit(tokenTwo.address, parseEther("100"))
+      it("Can deposit both supported tokens", async () => {
+        await expect(
+          vaultV2Proxy.connect(alice).deposit(token0.address, parseEther("50"))
+        )
+          .to.emit(vaultV2Proxy, "Deposit")
+          .withArgs(alice.address, token0.address, parseEther("50"));
+
+        await expect(
+          vaultV2Proxy.connect(alice).deposit(token1.address, parseEther("50"))
+        )
+          .to.emit(vaultV2Proxy, "Deposit")
+          .withArgs(alice.address, token1.address, parseEther("50"));
+      });
+    });
+
+    describe("#depositBySig", async () => {
+      beforeEach(async () => {
+        await vaultV2Proxy.connect(owner).addToken(token0.address);
+      });
+
+      it("Attempt to deposit the unsupported token should revert", async () => {
+        const signature = await signERC2612Permit(
+          alice,
+          token2.address,
+          alice.address,
+          vaultV2Proxy.address,
+          parseEther("1").toString()
+        );
+
+        await expect(
+          vaultV2Proxy
+            .connect(alice)
+            .depositBySig(
+              token2.address,
+              parseEther("1"),
+              signature.deadline,
+              signature.v,
+              signature.r,
+              signature.s
             )
-              .to.emit(vaultV2, "Deposit")
-              .withArgs(alice.address, tokenTwo.address, parseEther("100"));
+        )
+          .to.revertedWithCustomError(vaultV2Proxy, "WrongAddress")
+          .withArgs("deposit", token2.address);
+      });
 
-            expect([
-              await vaultV2.totalSupply(tokenOne.address),
-              await vaultV2.totalSupply(tokenTwo.address),
-              await vaultV2.balances(tokenOne.address, owner.address),
-              await vaultV2.balances(tokenTwo.address, alice.address),
-            ]).to.deep.eq([
-              parseEther("190"), // balance before upgrade implementation + deposit
-              parseEther("200"),
-              parseEther("100"),
-              parseEther("100"),
-            ]);
-          });
+      it("Insufficient number of tokens should revert", async () => {
+        const signature = await signERC2612Permit(
+          alice,
+          token2.address,
+          alice.address,
+          vaultV2Proxy.address,
+          "42"
+        );
 
-          it("Deposit token after adding support", async () => {
-            const { vaultV2, tokenThree } = await loadFixture(
-              deployVer2Fixture
-            );
-
-            await expect(vaultV2.addToken(tokenThree.address))
-              .to.emit(vaultV2, "TokenAdded")
-              .withArgs(tokenThree.address);
-
-            await tokenThree.approve(vaultV2.address, parseEther("1000"));
-
-            await expect(() =>
-              vaultV2.deposit(tokenThree.address, parseEther("1000"))
-            ).to.changeTokenBalance(tokenThree, vaultV2, parseEther("1000"));
-          });
-        });
-
-        describe("Deposit by signature", () => {
-          it("Revert NotEnoughAmount", async () => {
-            const { vaultV2, owner, tokenOne } = await loadFixture(
-              deployVer2Fixture
-            );
-
-            // 20 mins
-            const deadline = (await time.latest()) + 1200;
-
-            const signature = await signERC2612Permit(
-              owner, // provider (signer)
-              tokenOne.address, // token that supports permit functionality
-              owner.address, // owner of token
-              vaultV2.address, // spender
-              parseEther("0.01").toString(), // value
-              deadline
-            );
-
-            await expect(
-              vaultV2.depositBySig(
-                tokenOne.address,
-                parseEther("0.01"),
-                signature.deadline,
-                signature.v,
-                signature.r,
-                signature.s
-              )
+        await expect(
+          vaultV2Proxy
+            .connect(alice)
+            .depositBySig(
+              token2.address,
+              42,
+              signature.deadline,
+              signature.v,
+              signature.r,
+              signature.s
             )
-              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
-              .withArgs("deposit", parseEther("0.01"), tokenOne.address);
-          });
+        )
+          .to.revertedWithCustomError(vaultV2Proxy, "NotEnoughAmount")
+          .withArgs("deposit", 42, token2.address);
+      });
 
-          it("Revert WrongAddress - unsupported token", async () => {
-            const { vaultV2, owner, tokenThree } = await loadFixture(
-              deployVer2Fixture
-            );
+      it("Transfer failed", async () => {
+        const signature = await signERC2612Permit(
+          owner,
+          token0.address,
+          owner.address,
+          vaultV2Proxy.address,
+          parseEther("1").toString()
+        );
 
-            // 20 mins
-            const deadline = (await time.latest()) + 1200;
-
-            const signature = await signERC2612Permit(
-              owner, // provider (signer)
-              tokenThree.address, // token that supports permit functionality
-              owner.address, // owner of token
-              vaultV2.address, // spender
-              parseEther("100").toString(), // value
-              deadline
-            );
-
-            await expect(
-              vaultV2.depositBySig(
-                tokenThree.address,
-                parseEther("100"),
-                signature.deadline,
-                signature.v,
-                signature.r,
-                signature.s
-              )
+        await expect(
+          vaultV2Proxy
+            .connect(owner)
+            .depositBySig(
+              token0.address,
+              parseEther("1"),
+              signature.deadline,
+              signature.v,
+              signature.r,
+              signature.s
             )
-              .to.revertedWithCustomError(vaultV2, "WrongAddress")
-              .withArgs("deposit", tokenThree.address);
-          });
+        ).to.revertedWith("ERC20: transfer amount exceeds balance");
+      });
 
-          it("Deposit two different tokens by signature", async () => {
-            const { vaultV2, owner, tokenOne, alice, tokenTwo } =
-              await loadFixture(deployVer2Fixture);
+      it("Can deposit both supported tokens", async () => {
+        let signature = await signERC2612Permit(
+          alice,
+          token0.address,
+          alice.address,
+          vaultV2Proxy.address,
+          parseEther("50").toString()
+        );
 
-            // 20 mins
-            const deadline = (await time.latest()) + 1200;
-
-            let signature = await signERC2612Permit(
-              owner, // provider (signer)
-              tokenOne.address, // token that supports permit functionality
-              owner.address, // owner of token
-              vaultV2.address, // spender
-              parseEther("100").toString(), // value
-              deadline
-            );
-
-            await expect(
-              vaultV2.depositBySig(
-                tokenOne.address,
-                parseEther("100"),
-                signature.deadline,
-                signature.v,
-                signature.r,
-                signature.s
-              )
+        await expect(
+          vaultV2Proxy
+            .connect(alice)
+            .depositBySig(
+              token0.address,
+              parseEther("50"),
+              signature.deadline,
+              signature.v,
+              signature.r,
+              signature.s
             )
-              .to.emit(vaultV2, "Deposit")
-              .withArgs(owner.address, tokenOne.address, parseEther("100"));
+        )
+          .to.emit(vaultV2Proxy, "Deposit")
+          .withArgs(alice.address, token0.address, parseEther("50"));
 
-            signature = await signERC2612Permit(
-              alice, // provider (signer)
-              tokenTwo.address, // token that supports permit functionality
-              alice.address, // owner of token
-              vaultV2.address, // spender
-              parseEther("100").toString(), // value
-              deadline
-            );
+        signature = await signERC2612Permit(
+          alice,
+          token1.address,
+          alice.address,
+          vaultV2Proxy.address,
+          parseEther("50").toString()
+        );
 
-            await expect(
-              vaultV2
-                .connect(alice)
-                .depositBySig(
-                  tokenTwo.address,
-                  parseEther("100"),
-                  signature.deadline,
-                  signature.v,
-                  signature.r,
-                  signature.s
-                )
+        await expect(
+          vaultV2Proxy
+            .connect(alice)
+            .depositBySig(
+              token1.address,
+              parseEther("50"),
+              signature.deadline,
+              signature.v,
+              signature.r,
+              signature.s
             )
-              .to.emit(vaultV2, "Deposit")
-              .withArgs(alice.address, tokenTwo.address, parseEther("100"));
+        )
+          .to.emit(vaultV2Proxy, "Deposit")
+          .withArgs(alice.address, token1.address, parseEther("50"));
+      });
+    });
 
-            expect([
-              await vaultV2.totalSupply(tokenOne.address),
-              await vaultV2.totalSupply(tokenTwo.address),
-              await vaultV2.balances(tokenOne.address, owner.address),
-              await vaultV2.balances(tokenTwo.address, alice.address),
-            ]).to.deep.eq([
-              parseEther("190"), // balance before upgrade implementation + deposit
-              parseEther("200"),
-              parseEther("100"),
-              parseEther("100"),
-            ]);
-          });
-        });
+    describe("#withdraw", async () => {
+      it("Attempt to withdraw the unsupported token should revert, because its totalSupply is zero", async () => {
+        await expect(
+          vaultV2Proxy.connect(alice).withdraw(token2.address, parseEther("1"))
+        )
+          .to.revertedWithCustomError(vaultV2Proxy, "NotEnoughAmount")
+          .withArgs("withdraw", parseEther("1"), token2.address);
+      });
 
-        describe("Withdraw functionality", () => {
-          it("Revert NotEnoughAmount in withdraw function", async () => {
-            const { vaultV2, alice, tokenTwo } = await loadFixture(
-              deployVer2Fixture
-            );
+      it("Can withdraw both tokens", async () => {
+        await expect(
+          vaultV2Proxy.connect(alice).withdraw(token0.address, parseEther("50"))
+        )
+          .to.emit(vaultV2Proxy, "Withdraw")
+          .withArgs(alice.address, token0.address, parseEther("50"))
+          .to.changeTokenBalance(token0, alice, parseEther("50"));
 
-            expect(
-              await vaultV2.balances(tokenTwo.address, alice.address)
-            ).to.eq(constants.Zero);
-
-            await expect(
-              vaultV2.connect(alice).withdraw(tokenTwo.address, parseEther("1"))
-            )
-              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
-              .withArgs("withdraw", parseEther("1"), tokenTwo.address);
-          });
-
-          it("Revert NotEnoughAmount in withdraw function with unsupported token", async () => {
-            const { vaultV2, alice, tokenThree } = await loadFixture(
-              deployVer2Fixture
-            );
-
-            await expect(
-              vaultV2
-                .connect(alice)
-                .withdraw(tokenThree.address, parseEther("1"))
-            )
-              .to.revertedWithCustomError(vaultV2, "NotEnoughAmount")
-              .withArgs("withdraw", parseEther("1"), tokenThree.address);
-          });
-
-          it("Success withdraw to two users", async () => {
-            const { vaultV2, alice, tokenTwo, owner, tokenOne } =
-              await loadFixture(deployVer2Fixture);
-
-            await expect(vaultV2.withdraw(tokenTwo.address, parseEther("1")))
-              .to.emit(vaultV2, "Withdrawal")
-              .withArgs(owner.address, tokenTwo.address, parseEther("1"));
-
-            await expect(
-              vaultV2
-                .connect(alice)
-                .withdraw(tokenOne.address, parseEther("10"))
-            )
-              .to.emit(vaultV2, "Withdrawal")
-              .withArgs(alice.address, tokenOne.address, parseEther("10"));
-
-            expect([
-              await vaultV2.totalSupply(tokenOne.address),
-              await vaultV2.totalSupply(tokenTwo.address),
-              await vaultV2.balances(tokenTwo.address, owner.address),
-              await vaultV2.balances(tokenOne.address, alice.address),
-            ]).to.deep.eq([
-              parseEther("80"),
-              parseEther("99"),
-              parseEther("99"),
-              parseEther("80"),
-            ]);
-          });
-        });
+        await expect(
+          vaultV2Proxy.connect(alice).withdraw(token1.address, parseEther("50"))
+        )
+          .to.emit(vaultV2Proxy, "Withdraw")
+          .withArgs(alice.address, token1.address, parseEther("50"))
+          .to.changeTokenBalance(token1, alice, parseEther("50"));
       });
     });
   });

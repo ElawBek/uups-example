@@ -8,8 +8,8 @@ import {
   VaultV2__factory,
 } from "../typechain-types";
 
-const TOKEN1_ADDRESS = "0xf9bf22ad901D555e35C50AF17B933308876a3067";
-const PROXY_ADDRESS = "0xC762B63f8ccB79d1254dB47B7b3EFF98D92F81cE";
+const TOKEN1_ADDRESS = "";
+const PROXY_ADDRESS = "";
 
 async function main() {
   const [signer] = await ethers.getSigners();
@@ -22,10 +22,13 @@ async function main() {
 
   const implV2 = await new VaultV2__factory(signer).deploy();
   await implV2.deployed();
+  const addTokenData = implV2.interface.encodeFunctionData("addToken", [
+    TOKEN1_ADDRESS,
+  ]);
 
   const vaultV1Proxy = new VaultV1__factory(signer).attach(PROXY_ADDRESS);
 
-  tx = await vaultV1Proxy.upgradeTo(implV2.address);
+  tx = await vaultV1Proxy.upgradeToAndCall(implV2.address, addTokenData);
   await tx.wait();
 
   const vaultV2 = new VaultV2__factory(signer).attach(PROXY_ADDRESS);
@@ -45,7 +48,7 @@ async function main() {
   });
 }
 
-main().catch((error) => {
+main().catch(error => {
   console.error(error);
   process.exitCode = 1;
 });
