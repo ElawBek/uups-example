@@ -29,7 +29,6 @@ describe("UUPS upgrades", () => {
   let token1: Token;
   let token2: Token;
 
-  let implV1: VaultV1;
   let implV2: VaultV2;
 
   describe("1 ver", () => {

@@ -7,7 +7,7 @@ export async function deployTokens(
   owner: SignerWithAddress,
   alice: SignerWithAddress
 ) {
-  let tokens: Token[] = [];
+  const tokens: Token[] = [];
 
   for (let i = 0; i < 3; i++) {
     tokens[i] = await new Token__factory(owner).deploy(`Token${i}`, `TK${i}`);
